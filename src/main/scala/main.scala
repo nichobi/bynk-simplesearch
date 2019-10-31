@@ -12,10 +12,11 @@ object SimpleSearch extends App {
   import Program._
   (for {
     directory           <- readFile(args)
-    attemptedReads      <- Right(index(directory))
-    (failed, succeeded) <- Right(partitionTupleEither(attemptedReads))
-    _                   <- Right(failed.foreach(x => println(x._2)))
-    _                   <- Right(iterate(succeeded.toMap))
+    (failed, succeeded) <- Right(index(directory))
+    _ <- Right(failed.foreach {
+          case (file, error) => println(s"Skipped file $file due to error: $error")
+        })
+    _ <- Right(iterate(succeeded.toMap))
   } yield ()).fold(
     err => println(s"SimpleSearch exited with an error: $err"),
     _ => println("Exiting SimpleSearch")
@@ -34,34 +35,44 @@ object Program {
   def readFile(args: Array[String]): Either[ReadFileError, File] =
     for {
       path <- args.headOption.toRight(MissingPathArg)
-      file <- Try(new java.io.File(path)).fold(
+      file <- Try(new File(path)).fold(
                throwable => Left(InvalidPath(throwable)),
                file =>
-                 if (file.exists) Left(FileDoesNotExist(file))
+                 if (!file.exists) Left(FileDoesNotExist(file))
                  else if (!file.isDirectory) Left(NotDirectory(file))
                  else Right(file)
              )
     } yield file
 
-  def partitionTupleEither[A, B, E](list: Seq[(A, Either[E, B])]): (Seq[(A, E)], Seq[(A, B)]) =
-    list.partitionMap {
-      case (a, Left(e))  => Left(a  -> e)
-      case (a, Right(b)) => Right(a -> b)
+  /**
+    * Attempts to read all the files in the supplied directory, and returns two lists,
+    * one with the files that coudln't be read and the relevant error;
+    * and one with the successfully read files along with their contents as a list of unprocessed words.
+    */
+  def index(directory: File): (Seq[(File, Throwable)], Seq[(File, Set[String])]) = {
+    val files     = directory.listFiles.toSeq
+    val readFiles = files.map(file => file -> tryToReadFile(file).map(buildWordSets))
+    readFiles.partitionMap {
+      case (file, Left(err))      => Left(file  -> err)
+      case (file, Right(wordSet)) => Right(file -> wordSet)
     }
-
-  def index(directory: File): Seq[(File, Either[FileUnreadable, Set[String]])] = {
-    val files = directory.listFiles.sortBy(_.toString)
-    files.map(file => file -> tryToReadFile(file).map(buildWordSets)).toSeq
   }
 
-  def tryToReadFile(file: File): Either[FileUnreadable, Seq[String]] =
+  /**
+    * Tries to read a file and returns either a Throwable if the file can't be read,
+    * or a sequence of the words it contains (split by " ")
+    */
+  def tryToReadFile(file: File): Either[Throwable, Seq[String]] =
     (Try {
       val source   = scala.io.Source.fromFile(file)
       val rawWords = source.mkString.split(" ")
       source.close()
       rawWords.toIndexedSeq
-    }).fold(_ => Left(FileUnreadable(file)), rawWords => Right(rawWords))
+    }).fold(err => Left(err), rawWords => Right(rawWords))
 
+  /**
+    * Takes a sequence of Strings and builds a set of each word, converted to lowercase
+    */
   def buildWordSets(rawInput: Seq[String]): Set[String] =
     rawInput.filter(isWord).map(_.toLowerCase).toSet
 
@@ -73,6 +84,10 @@ object Program {
     }
   }
 
+  /**
+    * Prompts the user for a string, and if it isn't an exit keyword, searches the indexed files for it
+    * and displays the results, before looping
+    */
   def iterate(indexedFiles: Map[File, Set[String]]): Unit = {
     val searchString = readLine("Query> ")
     if (searchString != ":quit" && searchString != ":q") {
@@ -101,6 +116,11 @@ object Program {
       s"${ignoredString}Matches:\n${results.sortBy(-_.score).take(10).mkString("\n")}"
   }
 
+  /**
+    * Parses the search words, checks which ones are valid words, and then makes sure we have at
+    * least one valid word. If so, return a SearchResult with the files containing at leat one
+    * word. Returns a SearchError if the search is invalid
+    */
   def findResults(
       inputWords: Seq[String],
       indexedFiles: Map[File, Set[String]]
@@ -117,6 +137,10 @@ object Program {
       }
     }
 
+  /**
+    * Calculates the percentage of input words contained in each file, and returns a sequence of
+    * Results, containing a file and a score
+    */
   def score(
       inputWords: Seq[String],
       indexedFiles: Map[File, Set[String]]
